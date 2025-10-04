@@ -73,5 +73,15 @@ export interface SignupPayload {
   password: string
 }
 
+export interface ApprovalEvent {
+  at: string            // ISO timestamp
+  byUserId: number
+  decision: 'submitted' | 'approved' | 'rejected' | 'comment'
+  comment?: string
+}
+
+export interface ExpenseDetail extends Expense {
+  timeline: ApprovalEvent[]
+}
 
 export interface BasicOk { ok: true }

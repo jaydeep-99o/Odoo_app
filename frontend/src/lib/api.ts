@@ -1,8 +1,9 @@
+// src/lib/api.ts
 import type {
   LoginResponse, SignupPayload, BasicOk,
-  User, ApprovalFlow, Expense, ApprovalTask
+  User, ApprovalFlow, Expense, ApprovalTask, ExpenseDetail
 } from '../types'
-import { getUser } from './auth'
+import { getUser } from './auth'  
 
 
 const BASE = import.meta.env.VITE_API_URL || ''
@@ -154,66 +155,87 @@ async function mockFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   // EXPENSES
-  if (path === '/expenses/mine' && method === 'GET') {
-    const me = getUser()
-    const rows = db.expenses.filter(e => e.employeeId === me?.id)
-    return rows as any
-  }
-  if (path === '/expenses' && method === 'POST') {
-    const me = getUser()
-    const id = db.nextId++
-    const amountCompany = convert(body.amount, body.currency, db.company.currency)
-    const exp: Expense = {
-      id,
-      employeeId: me?.id || 3,
-      description: body.description,
-      category: body.category || 'Other',
-      spendDate: body.spendDate,
-      paidBy: body.paidBy,
-      remarks: body.remarks,
-      amount: Number(body.amount),
-      currency: body.currency,
-      amountCompanyCcy: amountCompany,
-      status: 'waiting', // enter manager queue immediately
-    }
-    db.expenses.unshift(exp)
-    saveDB(db)
-    return exp as any
+if (path === '/expenses' && method === 'POST') {
+  const me = getUser()
+  const id = db.nextId++
+  const amountCompany = convert(body.amount, body.currency, db.company.currency)
+
+  const exp: Expense & { timeline?: any[] } = {
+    id,
+    employeeId: me?.id || 3,
+    description: body.description,
+    category: body.category || 'Other',
+    spendDate: body.spendDate,
+    paidBy: body.paidBy,
+    remarks: body.remarks,
+    amount: Number(body.amount),
+    currency: body.currency,
+    amountCompanyCcy: amountCompany,
+    status: 'waiting',
   }
 
-  // APPROVALS
-  if (path === '/approvals/queue' && method === 'GET') {
-    const me = getUser()
-    const tasks: ApprovalTask[] = db.expenses
-      .filter(e => e.status === 'waiting')
-      .filter(e => {
-        const emp = db.users.find(u => u.id === e.employeeId)
-        return emp?.managerId === me?.id
-      })
-      .map((e) => ({
-        id: 10000 + e.id,
-        expenseId: e.id,
-        stepOrder: 1,
-        decision: 'pending',
-        comment: '',
-        createdAt: new Date().toISOString(),
-        amountCompanyCcy: e.amountCompanyCcy,
-        companyCurrency: db.company.currency,
-        submittedCurrency: e.currency,
-        ownerName: db.users.find(u => u.id === e.employeeId)?.name || 'Employee',
-        category: e.category,
-      }))
-    return tasks as any
-  }
-  if (path?.startsWith('/approvals/') && method === 'POST') {
-    const id = Number(path.split('/')[2]) // approval id
-    const expId = id - 10000
-    const exp = db.expenses.find(e => e.id === expId)
-    if (!exp) throw new Error('Not found')
-    exp.status = body.decision === 'approved' ? 'approved' : 'rejected'
-    saveDB(db)
-    return { ok: true } as any
-  }
+  // Start timeline – note the leading semicolon to avoid ASI gotcha
+  ;(exp as any).timeline = [
+    { at: new Date().toISOString(), byUserId: exp.employeeId, decision: 'submitted', comment: body.remarks || '' }
+  ]
+
+  db.expenses.unshift(exp as any)
+  saveDB(db)
+  return exp as any
+}
+
+
+// NEW: GET /expenses/:id
+if (path.startsWith('/expenses/') && method === 'GET') {
+  const id = Number(path.split('/')[2])
+  const exp = db.expenses.find(e => e.id === id)
+  if (!exp) throw new Error('Not found')
+  // ensure timeline exists
+  const withTL = exp as any
+  if (!withTL.timeline) withTL.timeline = [{ at: exp.spendDate, byUserId: exp.employeeId, decision: 'submitted' }]
+  return withTL as any
+}
+
+// APPROVALS
+if (path === '/approvals/queue' && method === 'GET') {
+  const me = getUser()
+  // simple rule for mocks: manager sees 'waiting' expenses of their direct reports
+  const tasks: ApprovalTask[] = db.expenses
+    .filter(e => e.status === 'waiting')
+    .filter(e => db.users.find(u => u.id === e.employeeId)?.managerId === me?.id)
+    .map((e) => ({
+      id: 10000 + e.id,
+      expenseId: e.id,
+      stepOrder: 1,
+      decision: 'pending',
+      comment: '',
+      createdAt: new Date().toISOString(),
+      amountCompanyCcy: e.amountCompanyCcy,
+      companyCurrency: db.company.currency,
+      submittedCurrency: e.currency,
+      ownerName: db.users.find(u => u.id === e.employeeId)?.name || 'Employee',
+      category: e.category,
+    }))
+  return tasks as any
+}
+if (path.startsWith('/approvals/') && method === 'POST') {
+  const me = getUser()
+  const id = Number(path.split('/')[2]) // approval id
+  const expId = id - 10000
+  const exp: any = db.expenses.find(e => e.id === expId)
+  if (!exp) throw new Error('Not found')
+  exp.status = body.decision === 'approved' ? 'approved' : 'rejected'
+  // NEW: push event with comment
+  exp.timeline = exp.timeline || []
+  exp.timeline.push({
+    at: new Date().toISOString(),
+    byUserId: me?.id || 0,
+    decision: body.decision,
+    comment: body.comment || ''
+  })
+  saveDB(db)
+  return { ok: true } as any
+}
 
   // OCR (stub)
   if (path === '/ocr' && method === 'POST') {
@@ -268,6 +290,7 @@ export const FlowAPI = {
 
 export const ExpensesAPI = {
   mine: () => fx<Expense[]>('/expenses/mine', { method: 'GET' }),
+  get:  (id: number) => fx<import('../types').ExpenseDetail>(`/expenses/${id}`, { method: 'GET' }),
   create: (payload: Omit<Expense, 'id' | 'employeeId' | 'amountCompanyCcy' | 'status'>) =>
     fx<Expense>('/expenses', { method: 'POST', body: JSON.stringify(payload) }),
 }

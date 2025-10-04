@@ -47,6 +47,9 @@ export default function ExpenseList() {
                 <td className="p-3">{e.category}</td>
                 <td className="p-3">{e.amount} {e.currency} <span className="text-xs text-gray-500">({e.amountCompanyCcy} company)</span></td>
                 <td className="p-3"><Badge s={e.status}/></td>
+                <td className="p-3">
+  <Link to={`/expense/${e.id}`} className="text-blue-600 underline">View</Link>
+</td>
               </tr>
             ))}
           </tbody>
